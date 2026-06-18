@@ -1,0 +1,6 @@
+# Editor / OS cruft
+.DS_Store
+*.swp
+
+# Local tooling
+.claude/

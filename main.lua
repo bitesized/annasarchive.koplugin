@@ -14,6 +14,36 @@ local ltn12 = require("ltn12")
 local logger = require("logger")
 local _ = require("gettext")
 
+-- Optional UI modules for cover+count display; not available in all KOReader
+-- builds. If any require fails the plugin still loads and falls back to Menu.
+local Screen, Geom, Font, Blitbuffer, ImageWidget, TitleBar
+local ScrollableContainer, InputContainer, FrameContainer
+local VerticalGroup, HorizontalGroup, CenterContainer, LeftContainer
+local TextWidget, VerticalSpan, HorizontalSpan, GestureRange
+
+local _rich_ui = pcall(function()
+    Screen        = require("device/screen")
+    Geom          = require("ui/geometry")
+    Font          = require("ui/font")
+    Blitbuffer    = require("ffi/blitbuffer")
+    ImageWidget   = require("ui/widget/imagewidget")
+    TitleBar      = require("ui/widget/titlebar")
+    ScrollableContainer = require("ui/widget/container/scrollablecontainer")
+    InputContainer      = require("ui/widget/container/inputcontainer")
+    FrameContainer      = require("ui/widget/container/framecontainer")
+    VerticalGroup       = require("ui/widget/verticalgroup")
+    HorizontalGroup     = require("ui/widget/horizontalgroup")
+    CenterContainer     = require("ui/widget/container/centercontainer")
+    LeftContainer       = require("ui/widget/container/leftcontainer")
+    TextWidget          = require("ui/widget/textwidget")
+    VerticalSpan        = require("ui/widget/verticalspan")
+    HorizontalSpan      = require("ui/widget/horizontalspan")
+    GestureRange        = require("ui/gesturerange")
+end)
+if not _rich_ui then
+    logger.warn("AnnaPlugin: rich UI widgets unavailable, falling back to Menu")
+end
+
 local function url_encode(str)
     return tostring(str):gsub("([^%w%-%.%_%~])", function(c)
         return string.format("%%%02X", string.byte(c))
@@ -28,6 +58,12 @@ end
 -- rely on a plain `string or default`.
 local function str_field(v)
     return type(v) == "string" and v or nil
+end
+
+local function formatDownloads(n)
+    if type(n) ~= "number" then return nil end
+    if n >= 1000 then return string.format("%.1fk", n / 1000) end
+    return tostring(n)
 end
 
 local AnnaPlugin = WidgetContainer:extend{
@@ -65,6 +101,10 @@ end
 function AnnaPlugin:downloadDir()
     return self.settings:readSetting("download_dir")
         or (DataStorage:getDataDir() .. "/downloads")
+end
+
+function AnnaPlugin:coverCacheDir()
+    return DataStorage:getDataDir() .. "/cache/annasarchive_covers"
 end
 
 -- HTTP
@@ -108,6 +148,39 @@ function AnnaPlugin:searchBooks(query)
         logger.warn("AnnaPlugin: dropped", dropped, "malformed search result(s)")
     end
     return results
+end
+
+function AnnaPlugin:fetchCover(result, callback)
+    local cover_url = str_field(result.cover_url)
+    if not cover_url then callback(nil) return end
+
+    local cache_path = DataStorage:getDataDir()
+        .. "/cache/annasarchive_covers/" .. result.md5 .. ".jpg"
+
+    local f = io.open(cache_path, "rb")
+    if f then f:close() callback(cache_path) return end
+
+    os.execute(string.format('mkdir -p "%s"', self:coverCacheDir():gsub('"', '\\"')))
+
+    local cmd = string.format(
+        'wget -q --no-check-certificate -O "%s" "%s"',
+        cache_path:gsub('"', '\\"'), cover_url:gsub('"', '\\"'))
+    local code = os.execute(cmd)
+    local success = (code == 0) or (code == true)
+    if success then
+        callback(cache_path)
+    else
+        os.remove(cache_path)
+        callback(nil)
+    end
+end
+
+function AnnaPlugin:prefetchCovers(results)
+    for _, r in ipairs(results) do
+        self:fetchCover(r, function(path)
+            r.cover_path = path
+        end)
+    end
 end
 
 function AnnaPlugin:fetchDownloadInfo(md5)
@@ -261,28 +334,151 @@ function AnnaPlugin:doSearch(query)
         return
     end
 
+    if _rich_ui then
+        local cover_spinner = InfoMessage:new{ text = _("Loading covers…") }
+        UIManager:show(cover_spinner)
+        UIManager:forceRePaint()
+        self:prefetchCovers(results)
+        UIManager:close(cover_spinner)
+    end
+
     self:showResults(query, results)
 end
 
+function AnnaPlugin:buildCoverWidget(cover_path)
+    local W = Screen:scaleBySize(60)
+    local H = Screen:scaleBySize(80)
+    if cover_path then
+        return ImageWidget:new{
+            file = cover_path, width = W, height = H, scale_factor = 0,
+        }
+    end
+    return FrameContainer:new{
+        width = W, height = H, bordersize = 1,
+        background = Blitbuffer.COLOR_LIGHT_GRAY, padding = 0,
+        CenterContainer:new{
+            dimen = Geom:new{ w = W, h = H },
+            TextWidget:new{
+                text = "?", face = Font:getFace("cfont", 20),
+            },
+        },
+    }
+end
+
+function AnnaPlugin:buildResultRow(r, row_w, on_tap)
+    local COVER_W = Screen:scaleBySize(60)
+    local COVER_H = Screen:scaleBySize(80)
+    local ROW_H   = COVER_H + Screen:scaleBySize(8)
+    local PAD     = Screen:scaleBySize(8)
+    local TEXT_W  = row_w - COVER_W - PAD * 3
+
+    local format = str_field(r.format)
+    local fmt    = format and format:upper() or "?"
+    local dl     = formatDownloads(r.downloads)
+    local meta   = dl and (fmt .. " · " .. dl) or fmt
+    local author = str_field(r.author)
+
+    local text_col = VerticalGroup:new{ align = "left" }
+    text_col[#text_col + 1] = TextWidget:new{
+        text = r.title or "?", face = Font:getFace("cfont", 20),
+        max_width = TEXT_W, bold = true,
+    }
+    if author and author ~= "" then
+        text_col[#text_col + 1] = VerticalSpan:new{ width = Screen:scaleBySize(3) }
+        text_col[#text_col + 1] = TextWidget:new{
+            text = author, face = Font:getFace("cfont", 16), max_width = TEXT_W,
+        }
+    end
+    text_col[#text_col + 1] = VerticalSpan:new{ width = Screen:scaleBySize(3) }
+    text_col[#text_col + 1] = TextWidget:new{
+        text = meta, face = Font:getFace("cfont", 14), max_width = TEXT_W,
+    }
+
+    local row_body = HorizontalGroup:new{ align = "center" }
+    row_body[1] = HorizontalSpan:new{ width = PAD }
+    row_body[2] = CenterContainer:new{
+        dimen = Geom:new{ w = COVER_W, h = ROW_H }, self:buildCoverWidget(r.cover_path),
+    }
+    row_body[3] = HorizontalSpan:new{ width = PAD }
+    row_body[4] = LeftContainer:new{
+        dimen = Geom:new{ w = TEXT_W, h = ROW_H }, text_col,
+    }
+
+    local item = InputContainer:new{
+        dimen = Geom:new{ w = row_w, h = ROW_H },
+    }
+    item.ges_events = {
+        TapSelect = { GestureRange:new{ ges = "tap", range = item.dimen } },
+    }
+    function item:onTapSelect() on_tap() return true end
+    item[1] = FrameContainer:new{
+        width = row_w, height = ROW_H, padding = 0, bordersize = 0,
+        background = Blitbuffer.COLOR_WHITE, row_body,
+    }
+    return item
+end
+
 function AnnaPlugin:showResults(query, results)
-    local items = {}
+    if not _rich_ui then
+        local items = {}
+        for _, r in ipairs(results) do
+            local format = str_field(r.format)
+            local fmt = format and format:upper() or "?"
+            local dl = formatDownloads(r.downloads)
+            local label = dl and (fmt .. " · " .. dl) or fmt
+            items[#items + 1] = {
+                text = r.title,
+                mandatory = label,
+                callback = function() self:confirmDownload(r) end,
+            }
+        end
+        local menu
+        menu = Menu:new{
+            title = _("Results: ") .. query,
+            item_table = items,
+            close_callback = function() UIManager:close(menu) end,
+        }
+        UIManager:show(menu)
+        return
+    end
+
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+
+    local results_widget
+
+    local title_bar = TitleBar:new{
+        title = _("Results: ") .. query,
+        close_callback = function() UIManager:close(results_widget) end,
+    }
+    local title_h = title_bar:getHeight()
+
+    local list = VerticalGroup:new{ align = "left" }
     for _, r in ipairs(results) do
-        local format = str_field(r.format)
-        local fmt = format and format:upper() or "?"
-        items[#items + 1] = {
-            text = r.title,
-            mandatory = fmt,
-            callback = function() self:confirmDownload(r) end,
+        list[#list + 1] = self:buildResultRow(r, screen_w, function()
+            UIManager:close(results_widget)
+            self:confirmDownload(r)
+        end)
+        list[#list + 1] = FrameContainer:new{
+            width = screen_w, height = 1, padding = 0, bordersize = 0,
+            background = Blitbuffer.COLOR_LIGHT_GRAY,
         }
     end
 
-    local menu
-    menu = Menu:new{
-        title = _("Results: ") .. query,
-        item_table = items,
-        close_callback = function() UIManager:close(menu) end,
+    local scroller = ScrollableContainer:new{
+        dimen       = Geom:new{ x = 0, y = 0, w = screen_w, h = screen_h - title_h },
+        show_parent = results_widget,
     }
-    UIManager:show(menu)
+    scroller[1] = list
+
+    results_widget = FrameContainer:new{
+        width = screen_w, height = screen_h, padding = 0,
+        margin = 0, bordersize = 0, background = Blitbuffer.COLOR_WHITE,
+        VerticalGroup:new{ title_bar, scroller },
+    }
+    results_widget.cropping_widget = scroller
+    scroller.show_parent = results_widget
+    UIManager:show(results_widget)
 end
 
 -- Download flow

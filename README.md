@@ -19,8 +19,9 @@ KOReader plugin  ──HTTP──▶  annas-archive-api  ──HTTPS──▶  A
 - A running instance of
   [annas-archive-api](https://github.com/bitesized/annas-archive-api) reachable
   from your device.
-- An Anna's Archive fast-download key (for downloads; searching works without
-  one).
+- Your Anna's Archive account secret key. Both searching and downloading need
+  it — Anna's Archive puts anonymous searches behind a DDoS-Guard challenge that
+  only a signed-in session skips.
 
 ## Installation
 
@@ -46,8 +47,8 @@ Open **Anna's Archive → Settings** and set:
 | ----------------- | ---------------------------- | ------------------------------------------------------------------ |
 | API Host          | `localhost`                  | Host where `annas-archive-api` is running.                         |
 | API Port          | `3000`                       | Port for the API (matches the API's `PORT`).                       |
-| Anna's Archive TLD| `gs`                         | TLD passed through to the API as the `tld` query parameter.        |
-| Download Key      | _(not set)_                  | Your Anna's Archive fast-download key. Required for downloads.     |
+| Anna's Archive TLD| _(not set)_                  | **Required.** Mirror TLD passed to the API as `tld`, e.g. `gd`. Your key is sent to this mirror — check [Anna's Archive's Wikipedia page](https://en.wikipedia.org/wiki/Anna%27s_Archive) for the current list, as retired mirrors get re-registered. |
+| Secret Key        | _(not set)_                  | Your Anna's Archive account secret key. Required to search and download. |
 | Download Dir      | `<koreader data>/downloads`  | Where downloaded files are saved.                                  |
 
 The plugin builds requests as `http://<API Host>:<API Port>/api`. Point these at
@@ -60,16 +61,24 @@ wherever you are hosting the companion API.
 3. Confirm the download. The file is fetched and saved to your Download Dir,
    then you'll see the saved path.
 
-Searching does not require a download key; downloading does.
+Both steps require the secret key and a TLD; the plugin asks you to set them
+before it will search. The same key authorises search and download — it's the
+one from your Anna's Archive account page.
 
 ## How it talks to the API
 
-- **Search** — `GET /api/search?query=<q>&limit=20&tld=<tld>`
-  Expects a JSON body with a `results` array, where each entry has at least
-  `title` and `md5` (and optionally `author` and `format`).
-- **Download** — `GET /api/download?md5=<md5>&tld=<tld>` with an
-  `Authorization: Bearer <download key>` header. Expects a JSON body with a
+- **Search** — `GET /api/search?query=<q>&limit=20&tld=<tld>` with an
+  `Authorization: Bearer <secret key>` header. Expects a JSON body with a
+  `results` array, where each entry has at least `title` and `md5` (and
+  optionally `author`, `format`, `downloads`, and `cover_url`).
+- **Download** — `GET /api/download?md5=<md5>&tld=<tld>` with the same
+  `Authorization: Bearer <secret key>` header. Expects a JSON body with a
   `download_url` (or `url`) field, which the plugin then fetches via `wget`.
+
+Error responses carry `{"error": "...", "code": "..."}`; the plugin surfaces
+`error` directly. A `401` (missing key, rejected key, or `code: "CHALLENGE"`
+when the upstream served a bot check) is reported with a pointer back to
+Settings.
 
 See the
 [annas-archive-api README](https://github.com/bitesized/annas-archive-api) for
@@ -77,6 +86,8 @@ how to run and configure the service.
 
 ## Notes
 
+- The secret key is sent as a `Bearer` token to your API host over plain HTTP,
+  so keep that host on a network you trust.
 - Malformed or partial search entries (which Anna's Archive can emit during
   outages or DDoS-Guard challenges) are dropped defensively, and JSON `null`
   values for optional fields are handled gracefully.

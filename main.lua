@@ -86,16 +86,48 @@ function AnnaPlugin:apiPort()
     return self.settings:readSetting("api_port") or "3000"
 end
 
+-- Required, and deliberately undefaulted. The key is sent to whichever mirror
+-- this names -- on searches too now, not just downloads -- and Anna's Archive
+-- rotates its domains, so a TLD baked in here would eventually point the key at
+-- a retired domain that someone else has since registered. The user picks it.
 function AnnaPlugin:annaTLD()
-    return self.settings:readSetting("anna_tld") or "gs"
+    return self.settings:readSetting("anna_tld") or ""
+end
+
+function AnnaPlugin:tldParam()
+    return "&tld=" .. url_encode(self:annaTLD())
 end
 
 function AnnaPlugin:apiUrl()
     return string.format("http://%s:%s/api", self:apiHost(), self:apiPort())
 end
 
-function AnnaPlugin:downloadKey()
+-- The Anna's Archive account secret key. It authorises both endpoints now:
+-- /api/download has always needed it, and /api/search needs it too since the
+-- upstream started putting anonymous searches behind a DDoS-Guard challenge
+-- that only a signed-in session skips. Stored under the historical
+-- "download_key" name so existing installs keep their saved key.
+function AnnaPlugin:secretKey()
     return self.settings:readSetting("download_key") or ""
+end
+
+-- Searching and downloading both need the key and a mirror, so both check the
+-- same way rather than failing later against the API.
+function AnnaPlugin:requireConfig()
+    local missing
+    if self:annaTLD() == "" then
+        missing = _("No Anna's Archive TLD set.\nSet it in Settings → Anna's Archive.")
+    elseif self:secretKey() == "" then
+        missing = _("No secret key set.\nSet it in Settings → Anna's Archive.")
+    else
+        return true
+    end
+    UIManager:show(InfoMessage:new{ text = missing })
+    return false
+end
+
+function AnnaPlugin:authHeaders()
+    return { ["authorization"] = "Bearer " .. self:secretKey() }
 end
 
 function AnnaPlugin:downloadDir()
@@ -122,12 +154,25 @@ end
 
 -- API calls
 
+-- Error responses carry {"error": "...", "code": "..."}. A 401 means the key
+-- is missing or was rejected (code "CHALLENGE" when the upstream served a bot
+-- check instead of results) -- both are fixed in Settings, so say so.
+function AnnaPlugin:apiError(body, status)
+    local ok, d = pcall(json.decode, body)
+    local msg = (ok and type(d) == "table" and str_field(d.error))
+        or ("HTTP " .. tostring(status))
+    if status == 401 then
+        return msg .. "\n\nCheck your secret key in Settings."
+    end
+    return msg
+end
+
 function AnnaPlugin:searchBooks(query)
     local url = self:apiUrl() .. "/search?query=" .. url_encode(query)
-        .. "&limit=20&tld=" .. url_encode(self:annaTLD())
-    local body, status, err = self:httpGet(url)
+        .. "&limit=20" .. self:tldParam()
+    local body, status, err = self:httpGet(url, self:authHeaders())
     if not body then return nil, err end
-    if status ~= 200 then return nil, "HTTP " .. status end
+    if status ~= 200 then return nil, self:apiError(body, status) end
     local ok, data = pcall(json.decode, body)
     if not ok or not data or not data.results then return nil, "Invalid response" end
 
@@ -184,15 +229,11 @@ function AnnaPlugin:prefetchCovers(results)
 end
 
 function AnnaPlugin:fetchDownloadInfo(md5)
-    local key = self:downloadKey()
-    local url = self:apiUrl() .. "/download?md5=" .. md5
-        .. "&tld=" .. url_encode(self:annaTLD())
-    local body, status, err = self:httpGet(url, { ["authorization"] = "Bearer " .. key })
+    local url = self:apiUrl() .. "/download?md5=" .. url_encode(md5)
+        .. self:tldParam()
+    local body, status, err = self:httpGet(url, self:authHeaders())
     if not body then return nil, err end
-    if status ~= 200 then
-        local ok, d = pcall(json.decode, body)
-        return nil, (ok and d and d.error) or ("HTTP " .. status)
-    end
+    if status ~= 200 then return nil, self:apiError(body, status) end
     local ok, data = pcall(json.decode, body)
     if not ok then return nil, "Invalid response" end
     return data
@@ -232,21 +273,24 @@ function AnnaPlugin:addToMainMenu(menu_items)
                     },
                     {
                         text_func = function()
-                            return "Anna's Archive TLD: " .. self:annaTLD()
+                            local tld = self:annaTLD()
+                            return "Anna's Archive TLD: "
+                                .. (tld ~= "" and tld or "(not set)")
                         end,
                         keep_menu_open = true,
                         callback = function()
-                            self:editSetting("anna_tld", "Anna's Archive TLD", self:annaTLD())
+                            self:editSetting("anna_tld", "Anna's Archive TLD", self:annaTLD(),
+                                _("Required, e.g. gd. Your key is sent to this mirror — check Anna's Archive's Wikipedia page for the current list."))
                         end,
                     },
                     {
                         text_func = function()
-                            local k = self:downloadKey()
-                            return "Download Key: " .. (k ~= "" and string.rep("*", math.min(#k, 8)) or "(not set)")
+                            local k = self:secretKey()
+                            return "Secret Key: " .. (k ~= "" and string.rep("*", math.min(#k, 8)) or "(not set)")
                         end,
                         keep_menu_open = true,
                         callback = function()
-                            self:editSetting("download_key", "Download Key", self:downloadKey())
+                            self:editSetting("download_key", "Account Secret Key", self:secretKey())
                         end,
                     },
                     {
@@ -266,10 +310,11 @@ end
 
 -- Settings UI
 
-function AnnaPlugin:editSetting(key, title, current)
+function AnnaPlugin:editSetting(key, title, current, description)
     local dialog
     dialog = InputDialog:new{
         title = title,
+        description = description,
         input = current,
         buttons = {{
             { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
@@ -318,6 +363,8 @@ function AnnaPlugin:showSearchDialog()
 end
 
 function AnnaPlugin:doSearch(query)
+    if not self:requireConfig() then return end
+
     local spinner = InfoMessage:new{ text = _("Searching…") }
     UIManager:show(spinner)
     UIManager:forceRePaint()
@@ -484,12 +531,7 @@ end
 -- Download flow
 
 function AnnaPlugin:confirmDownload(result)
-    if self:downloadKey() == "" then
-        UIManager:show(InfoMessage:new{
-            text = _("No download key set.\nAdd one in Settings → Anna's Archive."),
-        })
-        return
-    end
+    if not self:requireConfig() then return end
 
     local author = str_field(result.author)
     author = (author and author ~= "" and author) or "Unknown"

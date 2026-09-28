@@ -19,10 +19,10 @@ local _ = require("gettext")
 local Screen, Geom, Font, Blitbuffer, ImageWidget, TitleBar
 local ScrollableContainer, InputContainer, FrameContainer
 local VerticalGroup, HorizontalGroup, CenterContainer, LeftContainer
-local TextWidget, VerticalSpan, HorizontalSpan, GestureRange
+local TextWidget, VerticalSpan, HorizontalSpan, GestureRange, LineWidget
 
 local _rich_ui = pcall(function()
-    Screen        = require("device/screen")
+    Screen        = require("device").screen
     Geom          = require("ui/geometry")
     Font          = require("ui/font")
     Blitbuffer    = require("ffi/blitbuffer")
@@ -39,6 +39,7 @@ local _rich_ui = pcall(function()
     VerticalSpan        = require("ui/widget/verticalspan")
     HorizontalSpan      = require("ui/widget/horizontalspan")
     GestureRange        = require("ui/gesturerange")
+    LineWidget          = require("ui/widget/linewidget")
 end)
 if not _rich_ui then
     logger.warn("AnnaPlugin: rich UI widgets unavailable, falling back to Menu")
@@ -60,10 +61,12 @@ local function str_field(v)
     return type(v) == "string" and v or nil
 end
 
+-- Prefixed with a down arrow so the bare number reads as a download count.
+-- U+2193 is used throughout KOReader's own UI, so it renders in these fonts.
 local function formatDownloads(n)
     if type(n) ~= "number" then return nil end
-    if n >= 1000 then return string.format("%.1fk", n / 1000) end
-    return tostring(n)
+    if n >= 1000 then return string.format("↓ %.1fk", n / 1000) end
+    return "↓ " .. tostring(n)
 end
 
 local AnnaPlugin = WidgetContainer:extend{
@@ -473,8 +476,16 @@ function AnnaPlugin:showResults(query, results)
             local fmt = format and format:upper() or "?"
             local dl = formatDownloads(r.downloads)
             local label = dl and (fmt .. " · " .. dl) or fmt
+            -- Menu collapses an embedded newline when the row fits on one
+            -- line, which would run the author straight on from the title,
+            -- so separate them with a dash instead.
+            local author = str_field(r.author)
+            local text = r.title
+            if author and author ~= "" then
+                text = text .. " — " .. author
+            end
             items[#items + 1] = {
-                text = r.title,
+                text = text,
                 mandatory = label,
                 callback = function() self:confirmDownload(r) end,
             }
@@ -483,6 +494,7 @@ function AnnaPlugin:showResults(query, results)
         menu = Menu:new{
             title = _("Results: ") .. query,
             item_table = items,
+            multilines_show_more_text = true,
             close_callback = function() UIManager:close(menu) end,
         }
         UIManager:show(menu)
@@ -506,8 +518,10 @@ function AnnaPlugin:showResults(query, results)
             UIManager:close(results_widget)
             self:confirmDownload(r)
         end)
-        list[#list + 1] = FrameContainer:new{
-            width = screen_w, height = 1, padding = 0, bordersize = 0,
+        -- A separator has no child widget, so it can't be a FrameContainer:
+        -- FrameContainer:getSize() indexes self[1] and would crash on nil.
+        list[#list + 1] = LineWidget:new{
+            dimen = Geom:new{ w = screen_w, h = 1 },
             background = Blitbuffer.COLOR_LIGHT_GRAY,
         }
     end

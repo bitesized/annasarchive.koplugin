@@ -63,6 +63,14 @@ Open **Anna's Archive → Settings** and set:
 The plugin builds requests as `http://<API Host>:<API Port>/api`. Point these at
 wherever you are hosting the companion API.
 
+If the API runs on a machine at home and you want to search from elsewhere,
+one option is [Tailscale](https://tailscale.com): install it on the API host and
+on the Kobo using [kobo-tailscale](https://github.com/videah/kobo-tailscale),
+then set API Host to the host's Tailscale IP or MagicDNS name. The device
+reaches the API over your tailnet without exposing it to the internet.
+kobo-tailscale lists the Kobo models it supports; if DNS stops resolving on the
+device afterwards, its README covers the fix.
+
 ## Usage
 
 1. **Anna's Archive → Search Anna's Archive**, type a query, and confirm.
@@ -100,7 +108,8 @@ how to run and configure the service.
 ## Notes
 
 - The secret key is sent as a `Bearer` token to your API host over plain HTTP,
-  so keep that host on a network you trust.
+  so keep that host on a network you trust -- a home LAN, or a tailnet (see
+  [Configuration](#configuration)).
 - Malformed or partial search entries (which Anna's Archive can emit during
   outages or DDoS-Guard challenges) are dropped defensively, and JSON `null`
   values for optional fields are handled gracefully.

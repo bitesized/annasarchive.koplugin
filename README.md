@@ -65,11 +65,15 @@ wherever you are hosting the companion API.
 
 If the API runs on a machine at home and you want to search from elsewhere,
 one option is [Tailscale](https://tailscale.com): install it on the API host and
-on the Kobo using [kobo-tailscale](https://github.com/videah/kobo-tailscale),
-then set API Host to the host's Tailscale IP or MagicDNS name. The device
-reaches the API over your tailnet without exposing it to the internet.
-kobo-tailscale lists the Kobo models it supports; if DNS stops resolving on the
-device afterwards, its README covers the fix.
+on your e-reader, then set API Host to the host's Tailscale IP or MagicDNS name.
+The device reaches the API over your tailnet without exposing it to the
+internet.
+
+If you're using a Kobo,
+[kobo-tailscale](https://github.com/videah/kobo-tailscale) installs Tailscale on
+the device and keeps it running across reboots. It lists the Kobo models it
+supports, and its README covers a fix if DNS stops resolving on the device
+afterwards. On other devices, you'll need another way to run Tailscale.
 
 ## Usage
 

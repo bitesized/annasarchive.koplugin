@@ -11,6 +11,7 @@ local LuaSettings = require("luasettings")
 local json = require("json")
 local http = require("socket.http")
 local ltn12 = require("ltn12")
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local _ = require("gettext")
 
@@ -85,6 +86,16 @@ end
 
 -- Seconds a single cover download may take before wget gives up on it.
 local COVER_TIMEOUT = 10
+
+-- The cover cache is trimmed back under this many bytes before each search.
+local COVER_CACHE_MAX = 20 * 1024 * 1024
+
+local function formatSize(bytes)
+    if bytes >= 1024 * 1024 then
+        return string.format("%.1f MB", bytes / (1024 * 1024))
+    end
+    return string.format("%d KB", math.ceil(bytes / 1024))
+end
 
 -- Case-insensitive text order with blanks last, so results missing the field
 -- don't crowd the top of an A-Z list. Returns nil on a tie.
@@ -274,6 +285,50 @@ function AnnaPlugin:searchBooks(query)
     return results
 end
 
+-- Every file in the cover cache with its size and modification time, plus
+-- their total size. Reusing a cached cover bumps its modification time, so
+-- the oldest file is the cover shown least recently.
+function AnnaPlugin:listCoverCache()
+    local dir = self:coverCacheDir()
+    local files, total = {}, 0
+    if lfs.attributes(dir, "mode") ~= "directory" then return files, total end
+    for name in lfs.dir(dir) do
+        local path = dir .. "/" .. name
+        local attr = lfs.attributes(path)
+        if attr and attr.mode == "file" then
+            files[#files + 1] = {
+                name = name, path = path, size = attr.size, time = attr.modification,
+            }
+            total = total + attr.size
+        end
+    end
+    return files, total
+end
+
+-- Delete the least recently shown covers until the cache is back under
+-- COVER_CACHE_MAX. A search can add up to 20 covers on top, so the cache can
+-- sit a little over the cap until the next search trims it. Also clears out
+-- .part files stranded by a download that never finished (e.g. the device
+-- powered off mid-download); recent ones may still be in flight, so are left.
+function AnnaPlugin:trimCoverCache()
+    local files, total = self:listCoverCache()
+    local stranded = os.time() - 5 * 60
+    table.sort(files, function(a, b) return a.time < b.time end)
+    for _, f in ipairs(files) do
+        local is_part = f.name:sub(-5) == ".part"
+        if (is_part and f.time < stranded)
+                or (not is_part and total > COVER_CACHE_MAX) then
+            if os.remove(f.path) then total = total - f.size end
+        end
+    end
+end
+
+function AnnaPlugin:clearCoverCache()
+    for _, f in ipairs((self:listCoverCache())) do
+        os.remove(f.path)
+    end
+end
+
 function AnnaPlugin:coverPath(result)
     return self:coverCacheDir() .. "/" .. result.md5 .. ".jpg"
 end
@@ -293,6 +348,7 @@ function AnnaPlugin:startCoverDownloads(results)
             local path = self:coverPath(r)
             if file_exists(path) then
                 r.cover_path = path
+                lfs.touch(path) -- mark as recently shown, so trimming keeps it
             else
                 local part = sh_quote(path .. ".part")
                 cmds[#cmds + 1] = string.format(
@@ -407,6 +463,23 @@ function AnnaPlugin:addToMainMenu(menu_items)
                             self:chooseDownloadDir()
                         end,
                     },
+                    {
+                        text_func = function()
+                            local _files, total = self:listCoverCache()
+                            return _("Clear cover cache") .. " (" .. formatSize(total) .. ")"
+                        end,
+                        keep_menu_open = true,
+                        callback = function(touchmenu_instance)
+                            UIManager:show(ConfirmBox:new{
+                                text = _("Delete all cached cover thumbnails?\n\nThey download again when a search needs them."),
+                                ok_text = _("Clear"),
+                                ok_callback = function()
+                                    self:clearCoverCache()
+                                    touchmenu_instance:updateItems()
+                                end,
+                            })
+                        end,
+                    },
                 },
             },
         },
@@ -479,6 +552,10 @@ function AnnaPlugin:doSearch(query, replace_results)
     local spinner = InfoMessage:new{ text = _("Searching…") }
     UIManager:show(spinner)
     UIManager:forceRePaint()
+
+    -- Trim while the spinner is up: the search is about to wait on the
+    -- network anyway, so the directory scan costs nothing visible.
+    if _rich_ui then self:trimCoverCache() end
 
     local results, err = self:searchBooks(query)
     UIManager:close(spinner)

@@ -59,6 +59,7 @@ Open **Anna's Archive → Settings** and set:
 | Secret Key        | _(not set)_                  | Your Anna's Archive account secret key. Required to search and download. |
 | Sort results      | Relevance                    | Order of the result list: Relevance (Anna's Archive's order), Most downloaded, Title A–Z, Author A–Z, or Format. |
 | Download Dir      | `<koreader data>/downloads`  | Where downloaded files are saved.                                  |
+| Clear cover cache | —                            | Shows how much space cached cover thumbnails use, and deletes them. |
 
 The plugin builds requests as `http://<API Host>:<API Port>/api`. Point these at
 wherever you are hosting the companion API.
@@ -80,6 +81,8 @@ afterwards. On other devices, you'll need another way to run Tailscale.
 1. **Anna's Archive → Search Anna's Archive**, type a query, and confirm.
 2. Pick a result from the list. Results appear straight away; cover thumbnails
    fill in as they download in the background (and are cached for next time).
+   The cover cache is capped at 20 MB: before each search, the covers shown
+   least recently are deleted to bring it back under.
    To change the query, tap the search icon at the top left of the results;
    the box opens with your current query, and the old results stay up until
    the new search returns.

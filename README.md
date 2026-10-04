@@ -25,8 +25,9 @@ KOReader plugin  ──HTTP──▶  annas-archive-api  ──HTTPS──▶  A
 
 ## Installation
 
-1. Copy this folder into KOReader's `plugins/` directory, keeping the
-   `annasarchive.koplugin` folder name:
+1. Download the zip from the [latest
+   release](https://github.com/bitesized/annasarchive.koplugin/releases/latest)
+   and unpack it into KOReader's `plugins/` directory:
 
    ```
    <koreader>/plugins/annasarchive.koplugin/
@@ -36,6 +37,13 @@ KOReader plugin  ──HTTP──▶  annas-archive-api  ──HTTPS──▶  A
 
    On a Kobo this is typically
    `/mnt/onboard/.adds/koreader/plugins/annasarchive.koplugin/`.
+
+   The directory **must** be named `annasarchive.koplugin`: KOReader only
+   looks at directories whose name ends in `.koplugin`, and silently ignores
+   everything else. The release zip already has the name right. GitHub's own
+   "Download ZIP" button does not -- it gives you
+   `annasarchive.koplugin-main`, which KOReader will not load until you
+   rename it.
 
 2. Restart KOReader. The plugin appears in the menu under **Anna's Archive**.
 

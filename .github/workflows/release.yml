@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.0.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the version in _meta.lua matches the tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="$(sed -n 's/.*version = "\([^"]*\)".*/\1/p' _meta.lua)"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "tag $TAG does not match version $VERSION in _meta.lua" >&2
+            exit 1
+          fi
+
+      # KOReader loads a plugin from a directory whose name ends in
+      # .koplugin, so the zip has to unpack to one -- downloading the
+      # repository's own zip gives you "-main" on the end and no plugin.
+      - name: Build the plugin zip
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          mkdir -p dist/annasarchive.koplugin
+          cp _meta.lua *.lua README.md dist/annasarchive.koplugin/
+          cd dist && zip -r "../annasarchive.koplugin-$TAG.zip" annasarchive.koplugin
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: annasarchive.koplugin-*.zip
+          generate_release_notes: true
+          body: |
+            Unzip into KOReader's `plugins/` folder. The zip already contains a
+            correctly named `annasarchive.koplugin/` directory, so there is
+            nothing to rename. Restart KOReader afterwards.

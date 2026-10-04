@@ -19,7 +19,8 @@ local _ = require("gettext")
 local Screen, Geom, Font, Blitbuffer, ImageWidget, TitleBar
 local ScrollableContainer, InputContainer, FrameContainer
 local VerticalGroup, HorizontalGroup, CenterContainer, LeftContainer
-local TextWidget, VerticalSpan, HorizontalSpan, GestureRange, LineWidget
+local TextWidget, TextBoxWidget, VerticalSpan, HorizontalSpan, GestureRange
+local LineWidget
 
 local _rich_ui = pcall(function()
     Screen        = require("device").screen
@@ -36,6 +37,7 @@ local _rich_ui = pcall(function()
     CenterContainer     = require("ui/widget/container/centercontainer")
     LeftContainer       = require("ui/widget/container/leftcontainer")
     TextWidget          = require("ui/widget/textwidget")
+    TextBoxWidget       = require("ui/widget/textboxwidget")
     VerticalSpan        = require("ui/widget/verticalspan")
     HorizontalSpan      = require("ui/widget/horizontalspan")
     GestureRange        = require("ui/gesturerange")
@@ -67,6 +69,76 @@ local function formatDownloads(n)
     if type(n) ~= "number" then return nil end
     if n >= 1000 then return string.format("↓ %.1fk", n / 1000) end
     return "↓ " .. tostring(n)
+end
+
+-- Quote a string for sh. Cover URLs come from scraped HTML, so they must not
+-- be able to break out of the wget command line.
+local function sh_quote(s)
+    return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+local function file_exists(path)
+    local f = io.open(path, "rb")
+    if f then f:close() return true end
+    return false
+end
+
+-- Seconds a single cover download may take before wget gives up on it.
+local COVER_TIMEOUT = 10
+
+-- Case-insensitive text order with blanks last, so results missing the field
+-- don't crowd the top of an A-Z list. Returns nil on a tie.
+local function compareText(x, y)
+    x = x and x:lower() or ""
+    y = y and y:lower() or ""
+    if x == y then return nil end
+    if x == "" then return false end
+    if y == "" then return true end
+    return x < y
+end
+
+-- Result sort orders, matching the annas-archive-api web UI. Each compare
+-- returns nil on a tie, which falls through to the title and then to the
+-- upstream position, so the order is total and table.sort stays stable.
+local SORTS = {
+    { key = "relevance", text = _("Relevance") },
+    { key = "downloads", text = _("Most downloaded"), compare = function(a, b)
+        local x = type(a.downloads) == "number" and a.downloads or -1
+        local y = type(b.downloads) == "number" and b.downloads or -1
+        if x == y then return nil end
+        return x > y
+    end },
+    { key = "title", text = _("Title A–Z") },
+    { key = "author", text = _("Author A–Z"), compare = function(a, b)
+        return compareText(str_field(a.author), str_field(b.author))
+    end },
+    { key = "format", text = _("Format"), compare = function(a, b)
+        return compareText(str_field(a.format), str_field(b.format))
+    end },
+}
+
+-- Looked up here rather than inline in the menu: a `for _, s` loop there
+-- shadows the gettext `_` it also needs to call.
+local function sortLabel(key)
+    for _, s in ipairs(SORTS) do
+        if s.key == key then return s.text end
+    end
+end
+
+local function sortResults(results, key)
+    if key == "relevance" then return end
+    local compare
+    for _, s in ipairs(SORTS) do
+        if s.key == key then compare = s.compare end
+    end
+    local pos = {}
+    for i, r in ipairs(results) do pos[r] = i end
+    table.sort(results, function(a, b)
+        local c = compare and compare(a, b)
+        if c == nil then c = compareText(a.title, b.title) end
+        if c == nil then c = pos[a] < pos[b] end
+        return c
+    end)
 end
 
 local AnnaPlugin = WidgetContainer:extend{
@@ -138,6 +210,10 @@ function AnnaPlugin:downloadDir()
         or (DataStorage:getDataDir() .. "/downloads")
 end
 
+function AnnaPlugin:sortOrder()
+    return self.settings:readSetting("sort_order") or "relevance"
+end
+
 function AnnaPlugin:coverCacheDir()
     return DataStorage:getDataDir() .. "/cache/annasarchive_covers"
 end
@@ -198,37 +274,41 @@ function AnnaPlugin:searchBooks(query)
     return results
 end
 
-function AnnaPlugin:fetchCover(result, callback)
-    local cover_url = str_field(result.cover_url)
-    if not cover_url then callback(nil) return end
-
-    local cache_path = DataStorage:getDataDir()
-        .. "/cache/annasarchive_covers/" .. result.md5 .. ".jpg"
-
-    local f = io.open(cache_path, "rb")
-    if f then f:close() callback(cache_path) return end
-
-    os.execute(string.format('mkdir -p "%s"', self:coverCacheDir():gsub('"', '\\"')))
-
-    local cmd = string.format(
-        'wget -q --no-check-certificate -O "%s" "%s"',
-        cache_path:gsub('"', '\\"'), cover_url:gsub('"', '\\"'))
-    local code = os.execute(cmd)
-    local success = (code == 0) or (code == true)
-    if success then
-        callback(cache_path)
-    else
-        os.remove(cache_path)
-        callback(nil)
-    end
+function AnnaPlugin:coverPath(result)
+    return self:coverCacheDir() .. "/" .. result.md5 .. ".jpg"
 end
 
-function AnnaPlugin:prefetchCovers(results)
+-- Covers load in the background so the results show straight away. Cached
+-- covers are attached at once; every missing one is started together as its
+-- own backgrounded wget, so they download in parallel and os.execute returns
+-- immediately. Each writes to a .part file that is only renamed into place on
+-- success, so a file at the cover path is always complete. One try with a
+-- short timeout keeps a dead cover host from lingering. Returns the results
+-- still waiting on a cover.
+function AnnaPlugin:startCoverDownloads(results)
+    local pending, cmds = {}, {}
     for _, r in ipairs(results) do
-        self:fetchCover(r, function(path)
-            r.cover_path = path
-        end)
+        local cover_url = str_field(r.cover_url)
+        if cover_url then
+            local path = self:coverPath(r)
+            if file_exists(path) then
+                r.cover_path = path
+            else
+                local part = sh_quote(path .. ".part")
+                cmds[#cmds + 1] = string.format(
+                    "(wget -q -T %d -t 1 --no-check-certificate -O %s %s"
+                        .. " && mv %s %s || rm -f %s) >/dev/null 2>&1 &",
+                    COVER_TIMEOUT, part, sh_quote(cover_url),
+                    part, sh_quote(path), part)
+                pending[#pending + 1] = r
+            end
+        end
     end
+    if #cmds > 0 then
+        os.execute("mkdir -p " .. sh_quote(self:coverCacheDir()) .. "; "
+            .. table.concat(cmds, " "))
+    end
+    return pending
 end
 
 function AnnaPlugin:fetchDownloadInfo(md5)
@@ -250,7 +330,7 @@ function AnnaPlugin:addToMainMenu(menu_items)
         sorting_hint = "search",
         sub_item_table = {
             {
-                text = _("Search"),
+                text = _("Search Anna's Archive"),
                 callback = function() self:showSearchDialog() end,
             },
             {
@@ -294,6 +374,28 @@ function AnnaPlugin:addToMainMenu(menu_items)
                         keep_menu_open = true,
                         callback = function()
                             self:editSetting("download_key", "Account Secret Key", self:secretKey())
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            local label = sortLabel(self:sortOrder())
+                            return label and (_("Sort results: ") .. label)
+                                or _("Sort results")
+                        end,
+                        sub_item_table_func = function()
+                            local items = {}
+                            for _, s in ipairs(SORTS) do
+                                items[#items + 1] = {
+                                    text = s.text,
+                                    radio = true,
+                                    checked_func = function() return self:sortOrder() == s.key end,
+                                    callback = function()
+                                        self.settings:saveSetting("sort_order", s.key)
+                                        self.settings:flush()
+                                    end,
+                                }
+                            end
+                            return items
                         end,
                     },
                     {
@@ -346,17 +448,20 @@ end
 
 -- Search flow
 
-function AnnaPlugin:showSearchDialog()
+-- `query` pre-fills the box when refining a search from the results page;
+-- `replace_results` is passed through to doSearch to close that page.
+function AnnaPlugin:showSearchDialog(query, replace_results)
     local dialog
     dialog = InputDialog:new{
         title = _("Search Anna's Archive"),
+        input = query,
         buttons = {{
             { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
             { text = _("Search"), is_enter_default = true, callback = function()
                 local query = dialog:getInputText()
                 UIManager:close(dialog)
                 if query and query:match("%S") then
-                    self:doSearch(query)
+                    self:doSearch(query, replace_results)
                 end
             end },
         }},
@@ -365,7 +470,10 @@ function AnnaPlugin:showSearchDialog()
     dialog:onShowKeyboard()
 end
 
-function AnnaPlugin:doSearch(query)
+-- When refining from a results page, `replace_results` closes it -- but only
+-- once the new search has something to show, so a failed or empty search
+-- leaves the previous results open underneath its message.
+function AnnaPlugin:doSearch(query, replace_results)
     if not self:requireConfig() then return end
 
     local spinner = InfoMessage:new{ text = _("Searching…") }
@@ -384,14 +492,8 @@ function AnnaPlugin:doSearch(query)
         return
     end
 
-    if _rich_ui then
-        local cover_spinner = InfoMessage:new{ text = _("Loading covers…") }
-        UIManager:show(cover_spinner)
-        UIManager:forceRePaint()
-        self:prefetchCovers(results)
-        UIManager:close(cover_spinner)
-    end
-
+    if replace_results then replace_results() end
+    sortResults(results, self:sortOrder())
     self:showResults(query, results)
 end
 
@@ -418,7 +520,6 @@ end
 function AnnaPlugin:buildResultRow(r, row_w, on_tap)
     local COVER_W = Screen:scaleBySize(60)
     local COVER_H = Screen:scaleBySize(80)
-    local ROW_H   = COVER_H + Screen:scaleBySize(8)
     local PAD     = Screen:scaleBySize(8)
     local TEXT_W  = row_w - COVER_W - PAD * 3
 
@@ -429,26 +530,30 @@ function AnnaPlugin:buildResultRow(r, row_w, on_tap)
     local author = str_field(r.author)
 
     local text_col = VerticalGroup:new{ align = "left" }
-    text_col[#text_col + 1] = TextWidget:new{
+    -- Title and author wrap onto as many lines as they need rather than being
+    -- cut off, so the row grows to fit them.
+    text_col[#text_col + 1] = TextBoxWidget:new{
         text = r.title or "?", face = Font:getFace("cfont", 20),
-        max_width = TEXT_W, bold = true,
+        width = TEXT_W, bold = true,
     }
     if author and author ~= "" then
         text_col[#text_col + 1] = VerticalSpan:new{ width = Screen:scaleBySize(3) }
-        text_col[#text_col + 1] = TextWidget:new{
-            text = author, face = Font:getFace("cfont", 16), max_width = TEXT_W,
+        text_col[#text_col + 1] = TextBoxWidget:new{
+            text = author, face = Font:getFace("cfont", 16), width = TEXT_W,
         }
     end
     text_col[#text_col + 1] = VerticalSpan:new{ width = Screen:scaleBySize(3) }
     text_col[#text_col + 1] = TextWidget:new{
         text = meta, face = Font:getFace("cfont", 14), max_width = TEXT_W,
     }
+    local ROW_H = math.max(COVER_H, text_col:getSize().h) + Screen:scaleBySize(8)
 
     local row_body = HorizontalGroup:new{ align = "center" }
     row_body[1] = HorizontalSpan:new{ width = PAD }
-    row_body[2] = CenterContainer:new{
+    local cover_slot = CenterContainer:new{
         dimen = Geom:new{ w = COVER_W, h = ROW_H }, self:buildCoverWidget(r.cover_path),
     }
+    row_body[2] = cover_slot
     row_body[3] = HorizontalSpan:new{ width = PAD }
     row_body[4] = LeftContainer:new{
         dimen = Geom:new{ w = TEXT_W, h = ROW_H }, text_col,
@@ -465,7 +570,9 @@ function AnnaPlugin:buildResultRow(r, row_w, on_tap)
         width = row_w, height = ROW_H, padding = 0, bordersize = 0,
         background = Blitbuffer.COLOR_WHITE, row_body,
     }
-    return item
+    -- The cover slot is returned too, so a cover that arrives later can be
+    -- swapped in without rebuilding the row.
+    return item, cover_slot
 end
 
 function AnnaPlugin:showResults(query, results)
@@ -493,10 +600,14 @@ function AnnaPlugin:showResults(query, results)
         local menu
         menu = Menu:new{
             title = _("Results: ") .. query,
+            title_bar_left_icon = "appbar.search",
             item_table = items,
             multilines_show_more_text = true,
             close_callback = function() UIManager:close(menu) end,
         }
+        function menu.onLeftButtonTap()
+            self:showSearchDialog(query, function() UIManager:close(menu) end)
+        end
         UIManager:show(menu)
         return
     end
@@ -505,23 +616,42 @@ function AnnaPlugin:showResults(query, results)
     local screen_h = Screen:getHeight()
 
     local results_widget
+    local poll_covers
+    local closed = false
+    local function close()
+        closed = true
+        UIManager:unschedule(poll_covers)
+        UIManager:close(results_widget)
+    end
+
+    -- Before building the rows, so cached covers are in them from the start.
+    local pending = self:startCoverDownloads(results)
 
     local title_bar = TitleBar:new{
         title = _("Results: ") .. query,
-        close_callback = function() UIManager:close(results_widget) end,
+        left_icon = "appbar.search",
+        left_icon_tap_callback = function() self:showSearchDialog(query, close) end,
+        close_callback = close,
     }
     local title_h = title_bar:getHeight()
 
+    -- Rows are narrowed by the width the vertical scrollbar takes. At the full
+    -- screen width they overflowed the space beside it, and ScrollableContainer
+    -- answered with a horizontal scrollbar.
+    local list_w = screen_w - ScrollableContainer:getScrollbarWidth()
     local list = VerticalGroup:new{ align = "left" }
+    local cover_slots = {}
     for _, r in ipairs(results) do
-        list[#list + 1] = self:buildResultRow(r, screen_w, function()
-            UIManager:close(results_widget)
+        local row
+        row, cover_slots[r] = self:buildResultRow(r, list_w, function()
+            close()
             self:confirmDownload(r)
         end)
+        list[#list + 1] = row
         -- A separator has no child widget, so it can't be a FrameContainer:
         -- FrameContainer:getSize() indexes self[1] and would crash on nil.
         list[#list + 1] = LineWidget:new{
-            dimen = Geom:new{ w = screen_w, h = 1 },
+            dimen = Geom:new{ w = list_w, h = 1 },
             background = Blitbuffer.COLOR_LIGHT_GRAY,
         }
     end
@@ -538,8 +668,41 @@ function AnnaPlugin:showResults(query, results)
         VerticalGroup:new{ title_bar, scroller },
     }
     results_widget.cropping_widget = scroller
+    results_widget.covers_fullscreen = true
     scroller.show_parent = results_widget
-    UIManager:show(results_widget)
+    -- Without a refresh type, show() only paints the widget into the
+    -- framebuffer and enqueues no refresh for it, so the e-ink screen only
+    -- updated where something else happened to refresh (e.g. where the
+    -- "Searching…" box closed) and the rest of the list stayed stale until a
+    -- scroll repainted it. Ask for the whole view to be refreshed.
+    UIManager:show(results_widget, "ui")
+
+    -- Check once a second for covers that have finished downloading, and
+    -- repaint once per batch rather than once per cover -- each repaint is an
+    -- e-ink refresh. Stop when they're all in, when the view closes, or once
+    -- every wget has had time to time out.
+    local deadline = os.time() + COVER_TIMEOUT + 5
+    poll_covers = function()
+        if closed then return end
+        local arrived = false
+        for i = #pending, 1, -1 do
+            local r = pending[i]
+            local path = self:coverPath(r)
+            if file_exists(path) then
+                r.cover_path = path
+                cover_slots[r][1] = self:buildCoverWidget(path)
+                table.remove(pending, i)
+                arrived = true
+            end
+        end
+        if arrived then
+            UIManager:setDirty(results_widget, function() return "ui", scroller.dimen end)
+        end
+        if #pending > 0 and os.time() < deadline then
+            UIManager:scheduleIn(1, poll_covers)
+        end
+    end
+    if #pending > 0 then UIManager:scheduleIn(1, poll_covers) end
 end
 
 -- Download flow

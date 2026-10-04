@@ -57,6 +57,7 @@ Open **Anna's Archive → Settings** and set:
 | API Port          | `3000`                       | Port for the API (matches the API's `PORT`).                       |
 | Anna's Archive TLD| _(not set)_                  | **Required.** Mirror TLD passed to the API as `tld`, e.g. `gd`. Your key is sent to this mirror — check [Anna's Archive's Wikipedia page](https://en.wikipedia.org/wiki/Anna%27s_Archive) for the current list, as retired mirrors get re-registered. |
 | Secret Key        | _(not set)_                  | Your Anna's Archive account secret key. Required to search and download. |
+| Sort results      | Relevance                    | Order of the result list: Relevance (Anna's Archive's order), Most downloaded, Title A–Z, Author A–Z, or Format. |
 | Download Dir      | `<koreader data>/downloads`  | Where downloaded files are saved.                                  |
 
 The plugin builds requests as `http://<API Host>:<API Port>/api`. Point these at
@@ -64,8 +65,12 @@ wherever you are hosting the companion API.
 
 ## Usage
 
-1. **Anna's Archive → Search**, type a query, and confirm.
-2. Pick a result from the list (the format is shown on the right).
+1. **Anna's Archive → Search Anna's Archive**, type a query, and confirm.
+2. Pick a result from the list. Results appear straight away; cover thumbnails
+   fill in as they download in the background (and are cached for next time).
+   To change the query, tap the search icon at the top left of the results;
+   the box opens with your current query, and the old results stay up until
+   the new search returns.
 3. Confirm the download. The file is fetched and saved to your Download Dir,
    then you'll see the saved path.
 

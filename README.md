@@ -70,9 +70,9 @@ on your e-reader, then set API Host to the host's Tailscale IP or MagicDNS name.
 The device reaches the API over your tailnet without exposing it to the
 internet.
 
-[koreader-tailscale](https://github.com/victoria-riley-barnett/koreader-tailscale) installs Tailscale on
-the device and keeps it running across reboots. Its README covers how to use it
-and any device-specific considerations.
+[koreader-tailscale](https://github.com/victoria-riley-barnett/koreader-tailscale) lets you use
+Tailscale within KOReader. Its README covers how to use it and any
+device-specific considerations.
 
 ## Usage
 

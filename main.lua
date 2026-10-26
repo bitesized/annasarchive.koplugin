@@ -5,6 +5,7 @@ local Menu = require("ui/widget/menu")
 local PathChooser = require("ui/widget/pathchooser")
 local InfoMessage = require("ui/widget/infomessage")
 local ConfirmBox = require("ui/widget/confirmbox")
+local ButtonDialog = require("ui/widget/buttondialog")
 local UIManager = require("ui/uimanager")
 local DataStorage = require("datastorage")
 local LuaSettings = require("luasettings")
@@ -854,10 +855,31 @@ function AnnaPlugin:downloadToFile(result, url)
         return
     end
 
-    UIManager:show(InfoMessage:new{
-        text = _("Saved to:\n") .. filepath,
-        timeout = 5,
-    })
+    -- An InfoMessage with a timeout used to stand in for this, but its
+    -- auto-dismiss leaves the screen it vanishes from unrefreshed -- on
+    -- e-ink that shows up as ghosting from whatever was on screen before the
+    -- plugin ran. Ask explicitly instead, and refresh on the way out.
+    local done_dialog
+    done_dialog = ButtonDialog:new{
+        title = _("Saved to:\n") .. filepath,
+        buttons = {{
+            {
+                text = _("Search for another book"),
+                callback = function()
+                    UIManager:close(done_dialog)
+                    self:showSearchDialog()
+                end,
+            },
+            {
+                text = _("Close"),
+                callback = function()
+                    UIManager:close(done_dialog)
+                    UIManager:setDirty(nil, "full")
+                end,
+            },
+        }},
+    }
+    UIManager:show(done_dialog)
 end
 
 return AnnaPlugin

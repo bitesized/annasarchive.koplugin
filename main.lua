@@ -530,7 +530,13 @@ function AnnaPlugin:showSearchDialog(query, replace_results)
         title = _("Search Anna's Archive"),
         input = query,
         buttons = {{
-            { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+            -- The dialog and keyboard only refresh their own area on close,
+            -- which left the rest of the screen stale behind them (e.g. from
+            -- the download popups when reached via "Search for another book").
+            { text = _("Cancel"), callback = function()
+                UIManager:close(dialog)
+                UIManager:setDirty(nil, "flashui")
+            end },
             { text = _("Search"), is_enter_default = true, callback = function()
                 local query = dialog:getInputText()
                 UIManager:close(dialog)
@@ -699,7 +705,11 @@ function AnnaPlugin:showResults(query, results)
     local function close()
         closed = true
         UIManager:unschedule(poll_covers)
-        UIManager:close(results_widget)
+        -- Without a refresh type, close() repaints what was underneath into
+        -- the framebuffer but never refreshes it, so the e-ink screen kept
+        -- showing the results list around every later popup (the download
+        -- confirmation, spinners, the "Saved to" dialog). Flash it away.
+        UIManager:close(results_widget, "flashui")
     end
 
     -- Before building the rows, so cached covers are in them from the start.

@@ -53,12 +53,14 @@ Open **Anna's Archive → Settings** and set:
 
 | Setting           | Default                      | Description                                                        |
 | ----------------- | ---------------------------- | ------------------------------------------------------------------ |
-| API Host          | `localhost`                  | Host where `annas-archive-api` is running.                         |
-| API Port          | `3000`                       | Port for the API (matches the API's `PORT`).                       |
+| API host          | `localhost`                  | Host where `annas-archive-api` is running. A pasted URL is trimmed to the host, and a `:port` on the end is saved as the port. |
+| API port          | `3000`                       | Port for the API (matches the API's `PORT`). Must be 1–65535.      |
 | Anna's Archive TLD| _(not set)_                  | **Required.** Mirror TLD passed to the API as `tld`, e.g. `gd`. Your key is sent to this mirror — check [Anna's Archive's Wikipedia page](https://en.wikipedia.org/wiki/Anna%27s_Archive) for the current list, as retired mirrors get re-registered. |
-| Secret Key        | _(not set)_                  | Your Anna's Archive account secret key. Required to search and download. |
+| Secret key        | _(not set)_                  | Your Anna's Archive account secret key. Required to search and download. |
+| Test connection   | —                            | Checks the API is reachable (`/api/health`) and whether it can reach Anna's Archive. |
 | Sort results      | Relevance                    | Order of the result list: Relevance (Anna's Archive's order), Most downloaded, Title A–Z, Author A–Z, or Format. |
-| Download Dir      | `<koreader data>/downloads`  | Where downloaded files are saved.                                  |
+| Filter results    | Any                          | Only show the chosen formats (EPUB, PDF, MOBI, AZW3, FB2, DJVU, CBZ, TXT) and/or one language code, e.g. `en`. Filtering happens on the device, since the API has no filter parameters. |
+| Download folder   | `<koreader data>/downloads`  | Where downloaded files are saved by default. Choosing a folder with **Save to…** when downloading remembers it for that format. |
 | Clear cover cache | —                            | Shows how much space cached cover thumbnails use, and deletes them. |
 
 The plugin builds requests as `http://<API Host>:<API Port>/api`. Point these at
@@ -76,7 +78,8 @@ device-specific considerations.
 
 ## Usage
 
-1. **Anna's Archive → Search Anna's Archive**, type a query, and confirm.
+1. **Anna's Archive → Search Anna's Archive**, type a query, and confirm. The
+   **History** button lists your last 10 searches.
 2. Pick a result from the list. Results appear straight away; cover thumbnails
    fill in as they download in the background (and are cached for next time).
    The cover cache is capped at 20 MB: before each search, the covers shown
@@ -84,8 +87,14 @@ device-specific considerations.
    To change the query, tap the search icon at the top left of the results;
    the box opens with your current query, and the old results stay up until
    the new search returns.
-3. Confirm the download. The file is fetched and saved to your Download Dir,
-   then you'll see the saved path.
+   Each row shows the format, size, year, language and download count where
+   Anna's Archive has them. **Load more** at the bottom fetches the next page.
+3. Confirm the download. Tap **Save to…** to pick a different folder; that
+   folder becomes the default for books of the same format. The download runs
+   in the background with a progress dialog you can cancel. The file is written
+   as a `.part` and only renamed once complete, and an existing file with the
+   same name is never overwritten: ` (2)`, ` (3)`… is added instead.
+4. When it finishes, **Open now** opens the book straight away.
 
 Both steps require the secret key and a TLD; the plugin asks you to set them
 before it will search. The same key authorises search and download — it's the
@@ -93,18 +102,23 @@ one from your Anna's Archive account page.
 
 ## How it talks to the API
 
-- **Search** — `GET /api/search?query=<q>&limit=20&tld=<tld>` with an
+- **Search** — `GET /api/search?query=<q>&limit=50&page=<n>&tld=<tld>` with an
   `Authorization: Bearer <secret key>` header. Expects a JSON body with a
   `results` array, where each entry has at least `title` and `md5` (and
-  optionally `author`, `format`, `downloads`, and `cover_url`).
+  optionally `author`, `format`, `year`, `language`, `size`, `downloads`, and
+  `cover_url`). The API trims each upstream page to `limit`, so the plugin asks
+  for the maximum of 50 to make sure **Load more** doesn't skip results.
 - **Download** — `GET /api/download?md5=<md5>&tld=<tld>` with the same
   `Authorization: Bearer <secret key>` header. Expects a JSON body with a
-  `download_url` (or `url`) field, which the plugin then fetches via `wget`.
+  `download_url` (or `url`) field, which must be an `http(s)` URL. The plugin
+  then fetches it with a backgrounded `wget`.
+- **Test connection** — `GET /api/health?upstream=1`, no key needed.
 
 Error responses carry `{"error": "...", "code": "..."}`; the plugin surfaces
-`error` directly. A `401` (missing key, rejected key, or `code: "CHALLENGE"`
-when the upstream served a bot check) is reported with a pointer back to
-Settings.
+`error` directly, with a hint for the common cases: a `401` (missing key,
+`BAD_KEY`, or `CHALLENGE` when the upstream served a bot check) and a `400`
+`UNKNOWN_MIRROR` point back to Settings, and a `429` says how long to wait
+(from `Retry-After`). API requests time out after 90 seconds.
 
 See the
 [annas-archive-api README](https://github.com/bitesized/annas-archive-api) for
@@ -120,6 +134,9 @@ how to run and configure the service.
   values for optional fields are handled gracefully.
 - Downloads use `wget --no-check-certificate`; the device needs `wget`
   available (standard on Kobo/KOReader).
+- Filenames are built from the title (up to 80 characters) and author (up to
+  40), with characters that are illegal on FAT/exFAT replaced. A result with
+  an unknown or unusual format is saved as `.bin`.
 
 ## License
 
